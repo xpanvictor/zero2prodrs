@@ -1,10 +1,10 @@
+use sqlx::{Connection, PgConnection, PgPool};
 use std::net::TcpListener;
-use sqlx::{PgConnection, Connection};
 use zero2prod::configuration::get_configuration;
 
 #[tokio::test]
 async fn health_check_works() {
-    let address = spawn_app().await;
+    let address = spawn_app().await.address;
     // use reqwest
     let client = reqwest::Client::new();
 
@@ -20,7 +20,7 @@ async fn health_check_works() {
 
 #[tokio::test]
 async fn subscribe_returns_a_200_for_valid_form_data() {
-    let addr = spawn_app().await;
+    let addr = spawn_app().await.address;
     let configuration = get_configuration().expect("Failed to read configuration");
     let db_connection_string = configuration.database.connection_string();
     println!("db- {}", db_connection_string);
@@ -39,26 +39,25 @@ async fn subscribe_returns_a_200_for_valid_form_data() {
         .expect("Failed to execute request");
 
     assert_eq!(200, response.status().as_u16());
-    
+
     let saved = sqlx::query!("SELECT email, name FROM subscriptions",)
         .fetch_one(&mut connection)
         .await
         .expect("Failed to fetch saved subscription");
-    
-    assert_eq!(saved.email, "ursula_le_guin@gmail.com");
+
+    assert_eq!(saved.email, "ursula@gmail.com");
     assert_eq!(saved.name, "le guin");
-    
 }
 
 #[tokio::test]
 async fn subscribe_returns_a_400_for_missind_data() {
-    let addr = spawn_app().await;
+    let addr = spawn_app().await.address;
     let client = reqwest::Client::new();
 
     let test_cases = vec![
         ("name=le%20guin", "missing the email"),
         ("email=ursula%40gmail.com", "missing name"),
-        ("", "missing both name and email")
+        ("", "missing both name and email"),
     ];
 
     for (invalid_body, error_message) in test_cases {
@@ -73,17 +72,32 @@ async fn subscribe_returns_a_400_for_missind_data() {
         assert_eq!(
             400,
             response.status().as_u16(),
-            "API didn't fail with 400 when payload was {}", error_message
+            "API didn't fail with 400 when payload was {}",
+            error_message
         );
     }
 }
 
-async fn spawn_app() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .expect("Failed to bind random port");
+pub struct TestApp {
+    pub address: String,
+    pub db_pool: PgPool,
+}
+
+async fn spawn_app() -> TestApp {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind random port");
     let port = listener.local_addr().unwrap().port();
-    let server = zero2prod::startup::run(listener).await.expect("Failed to bind address");
+
+    let configuration = get_configuration().expect("Failed to read configs");
+    let connection_pool = PgPool::connect(&configuration.database.connection_string())
+        .await
+        .expect("Failed to connect postgres");
+    let server = zero2prod::startup::run(listener, connection_pool.clone())
+        .await
+        .expect("Failed to bind address");
     let _ = tokio::spawn(server);
 
-    format!("http://127.0.0.1:{}", port)
+    TestApp {
+        address: format!("http://127.0.0.1:{}", port),
+        db_pool: connection_pool,
+    }
 }
